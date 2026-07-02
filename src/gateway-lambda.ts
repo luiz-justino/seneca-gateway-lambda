@@ -4,12 +4,14 @@
 import Cookie from 'cookie'
 
 
-import { Open, Skip } from 'gubu'
+import { Open } from 'gubu'
 
 
+/*
 import type {
   GatewayResult
 } from '@seneca/gateway'
+*/
 
 
 type WebHookSpec = {
@@ -18,11 +20,11 @@ type WebHookSpec = {
   fixed: Record<string, any>
 }
 
-type GatewayLambdaOptions = {
-  event?: {
-    msg?: any
+type Options = {
+  event: {
+    msg: any
   },
-  auth?: {
+  auth: {
     cognito: {
       required: boolean
     },
@@ -34,8 +36,44 @@ type GatewayLambdaOptions = {
     cookie?: any
   },
   headers: Record<string, string>,
-  webhooks?: WebHookSpec[]
+  webhooks: WebHookSpec[]
 }
+
+
+export type GatewayLambdaOptions = Partial<Options>
+
+
+// Default options.
+const defaults = {
+  event: {
+    msg: 'sys,gateway,handle:event'
+  },
+  auth: {
+    cognito: {
+      required: false
+    },
+    token: {
+      name: 'seneca-auth'
+    },
+    cookie: Open({
+      maxAge: 365 * 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: true,
+      path: '/',
+    })
+  },
+  headers: Open({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': '*',
+    'Access-Control-Allow-Credentials': 'true',
+  }),
+  webhooks: [{
+    re: RegExp,
+    params: [String],
+    fixed: {}
+  }]
+}
+
 
 
 type GatewayLambdaDirective = {
@@ -68,12 +106,28 @@ type GatewayLambdaDirective = {
 }
 
 
+type Trigger = {
+  record: any,
+  event: any,
+  context: any,
+  gtag: string
+}
 
-function gateway_lambda(this: any, options: GatewayLambdaOptions) {
+type Handler = {
+  name: string,
+  match: (trigger: Trigger) => boolean
+  process: (trigger: Trigger, gateway: Function) => any
+}
+
+
+function gateway_lambda(this: any, options: Options) {
   const seneca: any = this
+
+  const handlers: Handler[] = []
 
   const tag = seneca.plugin.tag
   const gtag = (null == tag || '-' === tag) ? '' : '$' + tag
+  const prepare = seneca.export('gateway' + gtag + '/prepare')
   const gateway = seneca.export('gateway' + gtag + '/handler')
   const parseJSON = seneca.export('gateway' + gtag + '/parseJSON')
 
@@ -89,6 +143,8 @@ function gateway_lambda(this: any, options: GatewayLambdaOptions) {
             json[param] = m[1 + pI]
           }
           Object.assign(json, (webhook.fixed || {}))
+          json.body =
+            'string' === typeof event.body ? parseJSON(event.body) : event.body
           match = true
           break done;
         }
@@ -98,7 +154,38 @@ function gateway_lambda(this: any, options: GatewayLambdaOptions) {
   }
 
 
+  seneca
+    .fix('sys:gateway,kind:lambda')
+    .message(
+      'add:hook,hook:handler',
+      { handler: { name: String, match: Function, process: Function } },
+      async function(this: any, msg: any) {
+        handlers.push(msg.handler)
+      })
+
+
   async function handler(event: any, context: any) {
+
+    if (0 < handlers.length && 0 < event.Records?.length) {
+      let matched = 0
+      let lastResult = undefined
+      nextRecord: for (let record of event.Records) {
+        for (let handler of handlers) {
+          if (handler.match({ record, event, context, gtag })) {
+            matched++
+            const handlerDelegate = prepare(event, { context })
+            lastResult =
+              handler.process.call(handlerDelegate, {
+                record, event, context, gtag
+              }, gateway)
+            break nextRecord
+          }
+        }
+      }
+      if (0 < matched) {
+        return lastResult
+      }
+    }
 
     const res: any = {
       statusCode: 200,
@@ -114,6 +201,7 @@ function gateway_lambda(this: any, options: GatewayLambdaOptions) {
         ({} as any)
       )
 
+    // TODO: need better control of how the body is presented
     let json = null == body ? {} :
       'string' === typeof (body) ? parseJSON(body) : body
 
@@ -141,8 +229,6 @@ function gateway_lambda(this: any, options: GatewayLambdaOptions) {
     else {
       webhookMatch(event, json)
     }
-
-    // console.log('AAA', json)
 
     let queryStringParams = {
       ...(event.queryStringParameters || {}),
@@ -232,42 +318,13 @@ function gateway_lambda(this: any, options: GatewayLambdaOptions) {
     exports: {
       handler,
       eventhandler,
+      handlers: () => handlers,
     }
   }
 }
 
 
-// Default options.
-gateway_lambda.defaults = {
-  event: {
-    msg: 'sys,gateway,handle:event'
-  },
-  auth: {
-    cognito: {
-      required: false
-    },
-    token: {
-      name: 'seneca-auth'
-    },
-    cookie: Open({
-      maxAge: 365 * 24 * 60 * 60 * 1000,
-      httpOnly: true,
-      sameSite: true,
-      path: '/',
-    })
-  },
-  headers: Open({
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': '*',
-    'Access-Control-Allow-Credentials': 'true',
-  }),
-  webhooks: [{
-    re: RegExp,
-    params: [String],
-    fixed: {}
-  }]
-}
-
+Object.assign(gateway_lambda, { defaults })
 
 export default gateway_lambda
 

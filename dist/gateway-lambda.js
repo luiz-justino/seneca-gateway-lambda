@@ -6,10 +6,42 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const cookie_1 = __importDefault(require("cookie"));
 const gubu_1 = require("gubu");
+// Default options.
+const defaults = {
+    event: {
+        msg: 'sys,gateway,handle:event'
+    },
+    auth: {
+        cognito: {
+            required: false
+        },
+        token: {
+            name: 'seneca-auth'
+        },
+        cookie: (0, gubu_1.Open)({
+            maxAge: 365 * 24 * 60 * 60 * 1000,
+            httpOnly: true,
+            sameSite: true,
+            path: '/',
+        })
+    },
+    headers: (0, gubu_1.Open)({
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Allow-Credentials': 'true',
+    }),
+    webhooks: [{
+            re: RegExp,
+            params: [String],
+            fixed: {}
+        }]
+};
 function gateway_lambda(options) {
     const seneca = this;
+    const handlers = [];
     const tag = seneca.plugin.tag;
     const gtag = (null == tag || '-' === tag) ? '' : '$' + tag;
+    const prepare = seneca.export('gateway' + gtag + '/prepare');
     const gateway = seneca.export('gateway' + gtag + '/handler');
     const parseJSON = seneca.export('gateway' + gtag + '/parseJSON');
     const webhookMatch = (event, json) => {
@@ -24,6 +56,8 @@ function gateway_lambda(options) {
                         json[param] = m[1 + pI];
                     }
                     Object.assign(json, (webhook.fixed || {}));
+                    json.body =
+                        'string' === typeof event.body ? parseJSON(event.body) : event.body;
                     match = true;
                     break done;
                 }
@@ -31,8 +65,33 @@ function gateway_lambda(options) {
         }
         return match;
     };
+    seneca
+        .fix('sys:gateway,kind:lambda')
+        .message('add:hook,hook:handler', { handler: { name: String, match: Function, process: Function } }, async function (msg) {
+        handlers.push(msg.handler);
+    });
     async function handler(event, context) {
-        var _a, _b;
+        var _a, _b, _c;
+        if (0 < handlers.length && 0 < ((_a = event.Records) === null || _a === void 0 ? void 0 : _a.length)) {
+            let matched = 0;
+            let lastResult = undefined;
+            nextRecord: for (let record of event.Records) {
+                for (let handler of handlers) {
+                    if (handler.match({ record, event, context, gtag })) {
+                        matched++;
+                        const handlerDelegate = prepare(event, { context });
+                        lastResult =
+                            handler.process.call(handlerDelegate, {
+                                record, event, context, gtag
+                            }, gateway);
+                        break nextRecord;
+                    }
+                }
+            }
+            if (0 < matched) {
+                return lastResult;
+            }
+        }
         const res = {
             statusCode: 200,
             headers: { ...options.headers },
@@ -42,6 +101,7 @@ function gateway_lambda(options) {
         let headers = null == event.headers ? {} : Object
             .entries(event.headers)
             .reduce((a, entry) => (a[entry[0].toLowerCase()] = entry[1], a), {});
+        // TODO: need better control of how the body is presented
         let json = null == body ? {} :
             'string' === typeof (body) ? parseJSON(body) : body;
         json = null == json ? {} : json;
@@ -64,7 +124,6 @@ function gateway_lambda(options) {
         else {
             webhookMatch(event, json);
         }
-        // console.log('AAA', json)
         let queryStringParams = {
             ...(event.queryStringParameters || {}),
             ...(event.multiValueQueryStringParameters || {})
@@ -101,9 +160,9 @@ function gateway_lambda(options) {
                         options.auth.token.name + '=NONE; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
                 }
             }
-            else if ((_a = gateway$.redirect) === null || _a === void 0 ? void 0 : _a.location) {
+            else if ((_b = gateway$.redirect) === null || _b === void 0 ? void 0 : _b.location) {
                 res.statusCode = 302;
-                res.headers.location = (_b = gateway$.redirect) === null || _b === void 0 ? void 0 : _b.location;
+                res.headers.location = (_c = gateway$.redirect) === null || _c === void 0 ? void 0 : _c.location;
             }
             if (result.error) {
                 res.statusCode = gateway$.status || 500;
@@ -132,39 +191,11 @@ function gateway_lambda(options) {
         exports: {
             handler,
             eventhandler,
+            handlers: () => handlers,
         }
     };
 }
-// Default options.
-gateway_lambda.defaults = {
-    event: {
-        msg: 'sys,gateway,handle:event'
-    },
-    auth: {
-        cognito: {
-            required: false
-        },
-        token: {
-            name: 'seneca-auth'
-        },
-        cookie: (0, gubu_1.Open)({
-            maxAge: 365 * 24 * 60 * 60 * 1000,
-            httpOnly: true,
-            sameSite: true,
-            path: '/',
-        })
-    },
-    headers: (0, gubu_1.Open)({
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': '*',
-        'Access-Control-Allow-Credentials': 'true',
-    }),
-    webhooks: [{
-            re: RegExp,
-            params: [String],
-            fixed: {}
-        }]
-};
+Object.assign(gateway_lambda, { defaults });
 exports.default = gateway_lambda;
 if ('undefined' !== typeof (module)) {
     module.exports = gateway_lambda;
